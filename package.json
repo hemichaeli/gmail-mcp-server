@@ -5,7 +5,7 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "build": "npx esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --external:express",
+    "build": "npx esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --packages=external",
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts"
   },
