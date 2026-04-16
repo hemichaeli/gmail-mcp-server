@@ -1,0 +1,283 @@
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp';
+import { z } from 'zod';
+import {
+  gmailGet, gmailPost, gmailDelete,
+  handleGmailError
+} from '../gmail-client';
+import { GmailProfile, GmailFilter } from '../types';
+
+interface ListFiltersResponse {
+  filter?: GmailFilter[];
+}
+
+interface HistoryResponse {
+  history?: Array<{
+    id: string;
+    messages?: Array<{ id: string; threadId: string }>;
+    messagesAdded?: Array<{ message: { id: string; threadId: string; labelIds: string[] } }>;
+    messagesDeleted?: Array<{ message: { id: string; threadId: string } }>;
+    labelsAdded?: Array<{ message: { id: string }; labelIds: string[] }>;
+    labelsRemoved?: Array<{ message: { id: string }; labelIds: string[] }>;
+  }>;
+  nextPageToken?: string;
+  historyId?: string;
+}
+
+export function registerProfileTools(server: McpServer): void {
+
+  server.registerTool(
+    'gmail_get_profile',
+    {
+      title: 'Get Gmail Profile',
+      description: `Get the authenticated Gmail account profile information.
+
+Returns email address, total message count, total thread count, and current history ID.
+No arguments required.`,
+      inputSchema: {},
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+    },
+    async () => {
+      try {
+        const profile = await gmailGet<GmailProfile>('/users/me/profile');
+        const text = [
+          `Gmail Profile`,
+          `Email: ${profile.emailAddress}`,
+          `Total messages: ${profile.messagesTotal.toLocaleString()}`,
+          `Total threads: ${profile.threadsTotal.toLocaleString()}`,
+          `History ID: ${profile.historyId}`,
+        ].join('\n');
+        return { content: [{ type: 'text', text }] };
+      } catch (error) {
+        return { isError: true, content: [{ type: 'text', text: `Error: ${handleGmailError(error)}` }] };
+      }
+    }
+  );
+
+  server.registerTool(
+    'gmail_list_filters',
+    {
+      title: 'List Gmail Filters',
+      description: `List all Gmail filters configured in the account.
+
+Gmail filters automatically process incoming emails based on criteria and apply actions
+(add labels, archive, delete, forward, etc.). Returns all filter IDs, criteria, and actions.`,
+      inputSchema: {},
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+    },
+    async () => {
+      try {
+        const data = await gmailGet<ListFiltersResponse>('/users/me/settings/filters');
+        const filters = data.filter || [];
+
+        if (filters.length === 0) {
+          return { content: [{ type: 'text', text: 'No Gmail filters configured.' }] };
+        }
+
+        const text = [
+          `Gmail Filters (${filters.length} total)\n`,
+          ...filters.map((f, i) => {
+            const c = f.criteria;
+            const a = f.action;
+            const criteriaLines = [
+              c?.from ? `    from: ${c.from}` : '',
+              c?.to ? `    to: ${c.to}` : '',
+              c?.subject ? `    subject: ${c.subject}` : '',
+              c?.query ? `    query: ${c.query}` : '',
+              c?.hasAttachment ? `    has attachment: yes` : '',
+              c?.size ? `    size ${c.sizeComparison || 'larger'}: ${c.size}` : '',
+            ].filter(Boolean);
+
+            const actionLines = [
+              a?.addLabelIds?.length ? `    add labels: ${a.addLabelIds.join(', ')}` : '',
+              a?.removeLabelIds?.length ? `    remove labels: ${a.removeLabelIds.join(', ')}` : '',
+              a?.forward ? `    forward to: ${a.forward}` : '',
+            ].filter(Boolean);
+
+            return [
+              `${i + 1}. Filter ID: ${f.id}`,
+              criteriaLines.length ? `  Criteria:\n${criteriaLines.join('\n')}` : '  Criteria: (none)',
+              actionLines.length ? `  Actions:\n${actionLines.join('\n')}` : '  Actions: (none)',
+            ].join('\n');
+          }),
+        ].join('\n\n');
+
+        return { content: [{ type: 'text', text }] };
+      } catch (error) {
+        return { isError: true, content: [{ type: 'text', text: `Error: ${handleGmailError(error)}` }] };
+      }
+    }
+  );
+
+  server.registerTool(
+    'gmail_create_filter',
+    {
+      title: 'Create Gmail Filter',
+      description: `Create a new Gmail filter to automatically process incoming emails.
+
+At least one criteria field and one action field are required.
+
+Criteria (use at least one):
+  - from: sender email or pattern
+  - to: recipient email or pattern
+  - subject: subject contains text
+  - query: Gmail search query
+  - hasAttachment: match emails with attachments
+  - excludeChats: exclude Google Chat messages
+
+Actions (use at least one):
+  - addLabelIds: labels to add (e.g. ["STARRED", "Label_123"])
+  - removeLabelIds: labels to remove (e.g. ["INBOX"] to archive)
+  - forward: email address to forward to
+
+Example - Archive newsletters: from="newsletter@example.com", removeLabelIds=["INBOX"]`,
+      inputSchema: {
+        from: z.string().optional().describe('Filter emails from this sender'),
+        to: z.string().optional().describe('Filter emails to this recipient'),
+        subject: z.string().optional().describe('Filter emails with this subject text'),
+        query: z.string().optional().describe('Filter using Gmail search query'),
+        hasAttachment: z.boolean().optional().describe('Filter emails with attachments'),
+        excludeChats: z.boolean().optional().describe('Exclude Google Chat messages'),
+        addLabelIds: z.array(z.string()).optional()
+          .describe('Label IDs to add to matching emails'),
+        removeLabelIds: z.array(z.string()).optional()
+          .describe('Label IDs to remove (use "INBOX" to archive)'),
+        forward: z.string().email().optional()
+          .describe('Email address to forward matching emails to'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
+    },
+    async ({ from, to, subject, query, hasAttachment, excludeChats, addLabelIds, removeLabelIds, forward }) => {
+      try {
+        const criteria: Record<string, unknown> = {};
+        if (from) criteria['from'] = from;
+        if (to) criteria['to'] = to;
+        if (subject) criteria['subject'] = subject;
+        if (query) criteria['query'] = query;
+        if (hasAttachment !== undefined) criteria['hasAttachment'] = hasAttachment;
+        if (excludeChats !== undefined) criteria['excludeChats'] = excludeChats;
+
+        if (Object.keys(criteria).length === 0) {
+          return {
+            isError: true,
+            content: [{ type: 'text', text: 'Error: At least one criteria field is required (from, to, subject, query, hasAttachment, or excludeChats).' }]
+          };
+        }
+
+        const action: Record<string, unknown> = {};
+        if (addLabelIds?.length) action['addLabelIds'] = addLabelIds;
+        if (removeLabelIds?.length) action['removeLabelIds'] = removeLabelIds;
+        if (forward) action['forward'] = forward;
+
+        if (Object.keys(action).length === 0) {
+          return {
+            isError: true,
+            content: [{ type: 'text', text: 'Error: At least one action is required (addLabelIds, removeLabelIds, or forward).' }]
+          };
+        }
+
+        const filter = await gmailPost<GmailFilter>('/users/me/settings/filters', { criteria, action });
+
+        return {
+          content: [{
+            type: 'text',
+            text: `Filter created!\nFilter ID: ${filter.id}\nCriteria: ${JSON.stringify(filter.criteria)}\nActions: ${JSON.stringify(filter.action)}`
+          }]
+        };
+      } catch (error) {
+        return { isError: true, content: [{ type: 'text', text: `Error: ${handleGmailError(error)}` }] };
+      }
+    }
+  );
+
+  server.registerTool(
+    'gmail_delete_filter',
+    {
+      title: 'Delete Gmail Filter',
+      description: `Delete a Gmail filter. Existing emails are not affected, only future emails stop being filtered.
+
+Args:
+  - filterId: Gmail filter ID (from gmail_list_filters)`,
+      inputSchema: {
+        filterId: z.string().describe('Gmail filter ID to delete'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
+    },
+    async ({ filterId }) => {
+      try {
+        await gmailDelete(`/users/me/settings/filters/${filterId}`);
+        return { content: [{ type: 'text', text: `Filter ${filterId} deleted.` }] };
+      } catch (error) {
+        return { isError: true, content: [{ type: 'text', text: `Error: ${handleGmailError(error)}` }] };
+      }
+    }
+  );
+
+  server.registerTool(
+    'gmail_list_history',
+    {
+      title: 'List Gmail History',
+      description: `List changes to the mailbox since a specific history ID.
+
+Use this to track what changed (messages added/deleted, labels changed).
+Get startHistoryId from gmail_get_profile, gmail_get_message, or gmail_get_thread.
+
+Args:
+  - startHistoryId: required - history ID to list changes from
+  - maxResults: number of history records (1-500, default: 50)
+  - pageToken: pagination token
+  - historyTypes: types of history to return ("messageAdded", "messageDeleted", "labelAdded", "labelRemoved")
+  - labelId: filter history to changes involving this label`,
+      inputSchema: {
+        startHistoryId: z.string().describe('History ID to start from (get from gmail_get_profile historyId field)'),
+        maxResults: z.number().int().min(1).max(500).default(50).describe('Number of history records'),
+        pageToken: z.string().optional().describe('Pagination token'),
+        historyTypes: z.array(z.enum(['messageAdded', 'messageDeleted', 'labelAdded', 'labelRemoved'])).optional()
+          .describe('Types of history to return'),
+        labelId: z.string().optional().describe('Filter to changes involving this label ID'),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+    },
+    async ({ startHistoryId, maxResults, pageToken, historyTypes, labelId }) => {
+      try {
+        const params: Record<string, unknown> = { startHistoryId, maxResults };
+        if (pageToken) params['pageToken'] = pageToken;
+        if (historyTypes?.length) params['historyTypes'] = historyTypes.join(',');
+        if (labelId) params['labelId'] = labelId;
+
+        const data = await gmailGet<HistoryResponse>('/users/me/history', params);
+        const historyItems = data.history || [];
+
+        if (historyItems.length === 0) {
+          return { content: [{ type: 'text', text: `No history found since historyId ${startHistoryId}.` }] };
+        }
+
+        const lines = [
+          `History since ID ${startHistoryId}: ${historyItems.length} record(s)`,
+          `Current history ID: ${data.historyId || 'N/A'}`,
+          ...(data.nextPageToken ? [`Next page token: ${data.nextPageToken}`] : []),
+          ``,
+        ];
+
+        for (const record of historyItems) {
+          lines.push(`History ID: ${record.id}`);
+          if (record.messagesAdded?.length) {
+            lines.push(`  Added: ${record.messagesAdded.map(m => m.message.id).join(', ')}`);
+          }
+          if (record.messagesDeleted?.length) {
+            lines.push(`  Deleted: ${record.messagesDeleted.map(m => m.message.id).join(', ')}`);
+          }
+          if (record.labelsAdded?.length) {
+            lines.push(`  Labels added: ${record.labelsAdded.map(l => `${l.message.id}: [${l.labelIds.join(', ')}]`).join('; ')}`);
+          }
+          if (record.labelsRemoved?.length) {
+            lines.push(`  Labels removed: ${record.labelsRemoved.map(l => `${l.message.id}: [${l.labelIds.join(', ')}]`).join('; ')}`);
+          }
+        }
+
+        return { content: [{ type: 'text', text: lines.join('\n') }] };
+      } catch (error) {
+        return { isError: true, content: [{ type: 'text', text: `Error: ${handleGmailError(error)}` }] };
+      }
+    }
+  );
+}
