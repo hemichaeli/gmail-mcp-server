@@ -1,6 +1,6 @@
 import express from 'express';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp';
-import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { registerMessageTools } from './tools/messages';
 import { registerDraftTools } from './tools/drafts';
 import { registerLabelTools } from './tools/labels';
@@ -15,12 +15,11 @@ function createServer(): McpServer {
     version: '1.0.0',
   });
 
-  // Register all tool groups
-  registerMessageTools(server);  // 13 tools
-  registerDraftTools(server);    // 6 tools
-  registerLabelTools(server);    // 5 tools
-  registerThreadTools(server);   // 5 tools
-  registerProfileTools(server);  // 5 tools
+  registerMessageTools(server);
+  registerDraftTools(server);
+  registerLabelTools(server);
+  registerThreadTools(server);
+  registerProfileTools(server);
 
   return server;
 }
@@ -28,10 +27,8 @@ function createServer(): McpServer {
 async function main() {
   const app = express();
 
-  // Track active transports for cleanup
   const transports: Record<string, SSEServerTransport> = {};
 
-  // SSE endpoint - establishes connection
   app.get('/sse', async (req, res) => {
     console.error('[Gmail MCP] New SSE connection');
     const transport = new SSEServerTransport('/messages', res);
@@ -47,8 +44,6 @@ async function main() {
     await server.connect(transport);
   });
 
-  // Messages endpoint - DO NOT use express.json() middleware globally
-  // It would consume the raw stream before the MCP SDK can read it
   app.post('/messages', async (req, res) => {
     const sessionId = req.query.sessionId as string;
     const transport = transports[sessionId];
@@ -61,7 +56,6 @@ async function main() {
     await transport.handlePostMessage(req, res);
   });
 
-  // Health check
   app.get('/health', (req, res) => {
     res.json({
       status: 'ok',
@@ -75,13 +69,7 @@ async function main() {
   app.listen(PORT, () => {
     console.error(`[Gmail MCP] Server running on port ${PORT}`);
     console.error(`[Gmail MCP] SSE endpoint: http://localhost:${PORT}/sse`);
-    console.error(`[Gmail MCP] Health check: http://localhost:${PORT}/health`);
     console.error(`[Gmail MCP] Tools registered: 34`);
-    console.error(`[Gmail MCP]   - Messages: 13 tools`);
-    console.error(`[Gmail MCP]   - Drafts: 6 tools`);
-    console.error(`[Gmail MCP]   - Labels: 5 tools`);
-    console.error(`[Gmail MCP]   - Threads: 5 tools`);
-    console.error(`[Gmail MCP]   - Profile/Filters/History: 5 tools`);
   });
 }
 
