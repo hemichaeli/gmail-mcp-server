@@ -1,9 +1,8 @@
 import axios, { AxiosError } from 'axios';
 import { OAuth2Client } from 'google-auth-library';
-import { GmailMessage, MessagePart, ParsedMessage } from './types';
+import { GmailMessage, MessagePart, ParsedMessage } from './types.js';
 
 const GMAIL_API_BASE = 'https://gmail.googleapis.com/gmail/v1';
-
 let oauth2Client: OAuth2Client | null = null;
 
 function getOAuth2Client(): OAuth2Client {
@@ -11,13 +10,7 @@ function getOAuth2Client(): OAuth2Client {
     const clientId = process.env.GMAIL_CLIENT_ID;
     const clientSecret = process.env.GMAIL_CLIENT_SECRET;
     const refreshToken = process.env.GMAIL_REFRESH_TOKEN;
-
-    if (!clientId || !clientSecret || !refreshToken) {
-      throw new Error(
-        'Missing required env vars: GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, GMAIL_REFRESH_TOKEN.'
-      );
-    }
-
+    if (!clientId || !clientSecret || !refreshToken) throw new Error('Missing env vars: GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, GMAIL_REFRESH_TOKEN');
     oauth2Client = new OAuth2Client(clientId, clientSecret);
     oauth2Client.setCredentials({ refresh_token: refreshToken });
   }
@@ -27,61 +20,46 @@ function getOAuth2Client(): OAuth2Client {
 export async function getAccessToken(): Promise<string> {
   const client = getOAuth2Client();
   const tokenResponse = await client.getAccessToken();
-  if (!tokenResponse.token) {
-    throw new Error('Failed to get access token. Check that GMAIL_REFRESH_TOKEN is valid.');
-  }
+  if (!tokenResponse.token) throw new Error('Failed to get access token. Check GMAIL_REFRESH_TOKEN.');
   return tokenResponse.token;
 }
 
 export async function gmailGet<T>(endpoint: string, params?: Record<string, unknown>): Promise<T> {
   const token = await getAccessToken();
-  const response = await axios.get<T>(`${GMAIL_API_BASE}${endpoint}`, {
-    headers: { Authorization: `Bearer ${token}` },
-    params
-  });
+  const response = await axios.get<T>(`${GMAIL_API_BASE}${endpoint}`, { headers: { Authorization: `Bearer ${token}` }, params });
   return response.data;
 }
 
 export async function gmailPost<T>(endpoint: string, data?: unknown, params?: Record<string, unknown>): Promise<T> {
   const token = await getAccessToken();
-  const response = await axios.post<T>(`${GMAIL_API_BASE}${endpoint}`, data, {
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    params
-  });
+  const response = await axios.post<T>(`${GMAIL_API_BASE}${endpoint}`, data, { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, params });
   return response.data;
 }
 
 export async function gmailPut<T>(endpoint: string, data?: unknown): Promise<T> {
   const token = await getAccessToken();
-  const response = await axios.put<T>(`${GMAIL_API_BASE}${endpoint}`, data, {
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
-  });
+  const response = await axios.put<T>(`${GMAIL_API_BASE}${endpoint}`, data, { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } });
   return response.data;
 }
 
 export async function gmailPatch<T>(endpoint: string, data?: unknown): Promise<T> {
   const token = await getAccessToken();
-  const response = await axios.patch<T>(`${GMAIL_API_BASE}${endpoint}`, data, {
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
-  });
+  const response = await axios.patch<T>(`${GMAIL_API_BASE}${endpoint}`, data, { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } });
   return response.data;
 }
 
 export async function gmailDelete(endpoint: string): Promise<void> {
   const token = await getAccessToken();
-  await axios.delete(`${GMAIL_API_BASE}${endpoint}`, {
-    headers: { Authorization: `Bearer ${token}` }
-  });
+  await axios.delete(`${GMAIL_API_BASE}${endpoint}`, { headers: { Authorization: `Bearer ${token}` } });
 }
 
-// Download an attachment from Gmail and return it as base64
-export async function gmailGetAttachment(messageId: string, attachmentId: string): Promise<string> {
+export async function gmailGetAttachmentData(messageId: string, attachmentId: string): Promise<{ data: string; size: number }> {
   const token = await getAccessToken();
-  const response = await axios.get<{ size: number; data: string }>(
+  const response = await axios.get<{ data: string; size: number }>(
     `${GMAIL_API_BASE}/users/me/messages/${messageId}/attachments/${attachmentId}`,
     { headers: { Authorization: `Bearer ${token}` } }
   );
-  return response.data.data; // base64url encoded
+  return response.data;
 }
 
 export function handleGmailError(error: unknown): string {
@@ -99,15 +77,19 @@ export function handleGmailError(error: unknown): string {
   return String(error);
 }
 
-// ---- Attachment type ----
-
 export interface EmailAttachment {
-  filename: string;         // e.g. "report.pdf"
-  mimeType: string;         // e.g. "application/pdf"
-  data: string;             // base64-encoded file content (standard or url-safe)
+  filename: string;
+  mimeType: string;
+  data: string; // base64 (standard or URL-safe)
 }
 
-// ---- Email building ----
+export interface AttachmentInfo {
+  partId: string;
+  filename: string;
+  mimeType: string;
+  size: number;
+  attachmentId: string;
+}
 
 export function buildRawEmail(options: {
   to: string[];
@@ -121,10 +103,11 @@ export function buildRawEmail(options: {
   references?: string;
   attachments?: EmailAttachment[];
 }): string {
-  const boundary = `boundary_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-  const hasAttachments = options.attachments && options.attachments.length > 0;
+  const altBoundary = `alt_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  const mixBoundary = `mix_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  const hasAttachments = (options.attachments || []).length > 0;
 
-  const headerLines: string[] = [
+  const headers = [
     ...(options.from ? [`From: ${options.from}`] : []),
     `To: ${options.to.join(', ')}`,
     ...(options.cc?.length ? [`Cc: ${options.cc.join(', ')}`] : []),
@@ -135,42 +118,112 @@ export function buildRawEmail(options: {
     'MIME-Version: 1.0',
   ];
 
+  // Build text/html alternative part
+  let bodyBlock: string;
+  if (options.htmlBody) {
+    bodyBlock = [
+      `Content-Type: multipart/alternative; boundary="${altBoundary}"`,
+      '',
+      `--${altBoundary}`,
+      'Content-Type: text/plain; charset=UTF-8',
+      'Content-Transfer-Encoding: base64',
+      '',
+      Buffer.from(options.body).toString('base64'),
+      '',
+      `--${altBoundary}`,
+      'Content-Type: text/html; charset=UTF-8',
+      'Content-Transfer-Encoding: base64',
+      '',
+      Buffer.from(options.htmlBody).toString('base64'),
+      '',
+      `--${altBoundary}--`,
+    ].join('\r\n');
+  } else {
+    bodyBlock = [
+      'Content-Type: text/plain; charset=UTF-8',
+      'Content-Transfer-Encoding: base64',
+      '',
+      Buffer.from(options.body).toString('base64'),
+    ].join('\r\n');
+  }
+
   let emailContent: string;
 
   if (hasAttachments) {
-    // multipart/mixed wraps body + attachments
-    const innerBoundary = `inner_${boundary}`;
+    const attParts = (options.attachments || []).map(att => {
+      const b64 = att.data.replace(/-/g, '+').replace(/_/g, '/');
+      const chunked = (b64.match(/.{1,76}/g) || [b64]).join('\r\n');
+      return [
+        `--${mixBoundary}`,
+        `Content-Type: ${att.mimeType}; name="${att.filename}"`,
+        'Content-Transfer-Encoding: base64',
+        `Content-Disposition: attachment; filename="${att.filename}"`,
+        '',
+        chunked,
+      ].join('\r\n');
+    });
 
-    const bodyPart = options.htmlBody
-      ? [
-          `--${innerBoundary}`,
-          'Content-Type: text/plain; charset=UTF-8',
-          'Content-Transfer-Encoding: base64',
-          '',
-          Buffer.from(options.body).toString('base64'),
-          '',
-          `--${innerBoundary}`,
-          'Content-Type: text/html; charset=UTF-8',
-          'Content-Transfer-Encoding: base64',
-          '',
-          Buffer.from(options.htmlBody).toString('base64'),
-          '',
-          `--${innerBoundary}--`,
-        ].join('\r\n')
-      : [
-          `--${innerBoundary}`,
-          'Content-Type: text/plain; charset=UTF-8',
-          'Content-Transfer-Encoding: base64',
-          '',
-          Buffer.from(options.body).toString('base64'),
-          '',
-          `--${innerBoundary}--`,
-        ].join('\r\n');
+    emailContent = [
+      ...headers,
+      `Content-Type: multipart/mixed; boundary="${mixBoundary}"`,
+      '',
+      `--${mixBoundary}`,
+      bodyBlock,
+      '',
+      ...attParts,
+      `--${mixBoundary}--`,
+    ].join('\r\n');
+  } else {
+    emailContent = [...headers, bodyBlock].join('\r\n');
+  }
 
-    const bodySection = options.htmlBody
-      ? [`Content-Type: multipart/alternative; boundary="${innerBoundary}"`, '', bodyPart].join('\r\n')
-      : bodyPart;
+  return Buffer.from(emailContent).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
 
-    const attachmentParts = options.attachments!.map(att => {
-      // normalize base64url to standard base64
-      const b64 = att.data.replace(/-/g, '+').replace
+export function parseMessageHeaders(headers: Array<{ name: string; value: string }>): Record<string, string> {
+  return headers.reduce((acc, h) => { acc[h.name.toLowerCase()] = h.value; return acc; }, {} as Record<string, string>);
+}
+
+export function decodeBase64(data: string): string {
+  try { return Buffer.from(data.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf-8'); }
+  catch { return '[decode error]'; }
+}
+
+export function extractBodyAndAttachments(part: MessagePart): { text: string; html: string; attachments: AttachmentInfo[] } {
+  let text = '';
+  let html = '';
+  const attachments: AttachmentInfo[] = [];
+
+  function walk(p: MessagePart) {
+    if (p.filename && p.body?.attachmentId) {
+      attachments.push({ partId: p.partId || '', filename: p.filename, mimeType: p.mimeType || 'application/octet-stream', size: p.body.size || 0, attachmentId: p.body.attachmentId });
+    } else if (p.mimeType === 'text/plain' && p.body?.data) {
+      text += decodeBase64(p.body.data);
+    } else if (p.mimeType === 'text/html' && p.body?.data) {
+      html += decodeBase64(p.body.data);
+    }
+    if (p.parts) for (const sub of p.parts) walk(sub);
+  }
+
+  walk(part);
+  return { text, html, attachments };
+}
+
+export function parseFullMessage(msg: GmailMessage): ParsedMessage & { attachments: AttachmentInfo[] } {
+  const headers = msg.payload?.headers ? parseMessageHeaders(msg.payload.headers) : {};
+  const { text, html, attachments } = msg.payload ? extractBodyAndAttachments(msg.payload) : { text: '', html: '', attachments: [] };
+  return {
+    id: msg.id, threadId: msg.threadId,
+    from: headers['from'] || '', to: headers['to'] || '', cc: headers['cc'], bcc: headers['bcc'],
+    subject: headers['subject'] || '(no subject)',
+    date: msg.internalDate ? new Date(parseInt(msg.internalDate)).toLocaleString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'short' }) : headers['date'] || '',
+    snippet: msg.snippet, body: text, htmlBody: html || undefined,
+    labelIds: msg.labelIds || [], sizeEstimate: msg.sizeEstimate, attachments,
+  };
+}
+
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
