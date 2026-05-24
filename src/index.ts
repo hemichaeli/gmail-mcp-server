@@ -1,1 +1,96 @@
-import { createServer, IncomingMessage, ServerResponse } from 'node:http';\nimport { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';\nimport { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';\nimport { registerMessageTools } from './tools/messages.js';\nimport { registerDraftTools } from './tools/drafts.js';\nimport { registerLabelTools } from './tools/labels.js';\nimport { registerThreadTools } from './tools/threads.js';\nimport { registerProfileTools } from './tools/profile.js';\n\nconst PORT = parseInt(process.env.PORT || '3000', 10);\nconst transports: Record<string, SSEServerTransport> = {};\n\nfunction buildMcpServer(): McpServer {\n  const server = new McpServer({ name: 'gmail-mcp-server', version: '2.0.0' });\n  registerMessageTools(server);  // 14 tools (incl. gmail_get_attachment)\n  registerDraftTools(server);    // 6 tools (create/update now support attachments)\n  registerLabelTools(server);    // 5 tools\n  registerThreadTools(server);   // 5 tools\n  registerProfileTools(server);  // 5 tools\n  return server;\n}\n\nfunction sendJson(res: ServerResponse, status: number, body: unknown) {\n  const json = JSON.stringify(body);\n  res.writeHead(status, { 'Content-Type': 'application/json' });\n  res.end(json);\n}\n\nconst httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {\n  const url = new URL(req.url || '/', `http://localhost:${PORT}`);\n\n  res.setHeader('Access-Control-Allow-Origin', '*');\n  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');\n  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');\n\n  if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }\n\n  if (req.method === 'GET' && url.pathname === '/health') {\n    sendJson(res, 200, {\n      status: 'ok', server: 'gmail-mcp-server', version: '2.0.0',\n      tools: 35, activeSessions: Object.keys(transports).length,\n      features: ['attachments', 'multipart-mime', 'draft-attachments']\n    });\n    return;\n  }\n\n  if (req.method === 'GET' && url.pathname === '/sse') {\n    console.error('[Gmail MCP] New SSE connection');\n    try {\n      const transport = new SSEServerTransport('/messages', res);\n      const sessionId = transport.sessionId;\n      transports[sessionId] = transport;\n      console.error(`[Gmail MCP] Transport created: ${sessionId}`);\n      \n      req.on('close', () => {\n        console.error(`[Gmail MCP] Request closed: ${sessionId}`);\n        delete transports[sessionId];\n      });\n      \n      const server = buildMcpServer();\n      console.error(`[Gmail MCP] Server instance created, registering tools...`);\n      \n      await server.connect(transport);\n      console.error(`[Gmail MCP] Server connected to transport: ${sessionId}`);\n    } catch (error) {\n      console.error(`[Gmail MCP] Connection error:`, error instanceof Error ? error.message : String(error));\n      if (!res.headersSent) {\n        sendJson(res, 500, { error: 'Failed to establish SSE connection', details: error instanceof Error ? error.message : String(error) });\n      }\n    }\n    return;\n  }\n\n  if (req.method === 'POST' && url.pathname === '/messages') {\n    const sessionId = url.searchParams.get('sessionId') || '';\n    const transport = transports[sessionId];\n    if (!transport) { sendJson(res, 404, { error: `No active session: ${sessionId}` }); return; }\n    try {\n      await transport.handlePostMessage(req, res);\n    } catch (error) {\n      console.error(`[Gmail MCP] Message handling error for ${sessionId}:`, error instanceof Error ? error.message : String(error));\n      if (!res.headersSent) {\n        sendJson(res, 500, { error: 'Message handling failed' });\n      }\n    }\n    return;\n  }\n\n  sendJson(res, 404, { error: 'Not found' });\n});\n\nhttpServer.listen(PORT, () => {\n  console.error(`[Gmail MCP] v2.0.0 running on port ${PORT}`);\n  console.error(`[Gmail MCP] SSE endpoint: http://localhost:${PORT}/sse`);\n  console.error(`[Gmail MCP] Tools: 35 (Messages:14 | Drafts:6 | Labels:5 | Threads:5 | Profile/Filters/History:5)`);\n  console.error(`[Gmail MCP] Features: file attachments (multipart/mixed MIME), attachment download`);\n});\n
+import { createServer, IncomingMessage, ServerResponse } from 'node:http';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { registerMessageTools } from './tools/messages.js';
+import { registerDraftTools } from './tools/drafts.js';
+import { registerLabelTools } from './tools/labels.js';
+import { registerThreadTools } from './tools/threads.js';
+import { registerProfileTools } from './tools/profile.js';
+
+const PORT = parseInt(process.env.PORT || '3000', 10);
+const transports: Record<string, SSEServerTransport> = {};
+
+function buildMcpServer(): McpServer {
+  const server = new McpServer({ name: 'gmail-mcp-server', version: '2.0.0' });
+  registerMessageTools(server);
+  registerDraftTools(server);
+  registerLabelTools(server);
+  registerThreadTools(server);
+  registerProfileTools(server);
+  return server;
+}
+
+function sendJson(res: ServerResponse, status: number, body: unknown) {
+  const json = JSON.stringify(body);
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(json);
+}
+
+const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+  const url = new URL(req.url || '/', `http://localhost:${PORT}`);
+
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+
+  if (req.method === 'GET' && url.pathname === '/health') {
+    sendJson(res, 200, {
+      status: 'ok', server: 'gmail-mcp-server', version: '2.0.0',
+      tools: 35, activeSessions: Object.keys(transports).length,
+      features: ['attachments', 'multipart-mime', 'draft-attachments']
+    });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/sse') {
+    console.error('[Gmail MCP] New SSE connection');
+    try {
+      const transport = new SSEServerTransport('/messages', res);
+      const sessionId = transport.sessionId;
+      transports[sessionId] = transport;
+      console.error(`[Gmail MCP] Transport created: ${sessionId}`);
+
+      req.on('close', () => {
+        console.error(`[Gmail MCP] Request closed: ${sessionId}`);
+        delete transports[sessionId];
+      });
+
+      const server = buildMcpServer();
+      console.error('[Gmail MCP] Server instance created');
+
+      await server.connect(transport);
+      console.error(`[Gmail MCP] Connected: ${sessionId}`);
+    } catch (error) {
+      console.error('[Gmail MCP] Error:', error instanceof Error ? error.message : String(error));
+      if (!res.headersSent) {
+        sendJson(res, 500, { error: 'SSE connection failed' });
+      }
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/messages') {
+    const sessionId = url.searchParams.get('sessionId') || '';
+    const transport = transports[sessionId];
+    if (!transport) { sendJson(res, 404, { error: `No session: ${sessionId}` }); return; }
+    try {
+      await transport.handlePostMessage(req, res);
+    } catch (error) {
+      console.error(`[Gmail MCP] Post error:`, error instanceof Error ? error.message : String(error));
+      if (!res.headersSent) {
+        sendJson(res, 500, { error: 'Message handling failed' });
+      }
+    }
+    return;
+  }
+
+  sendJson(res, 404, { error: 'Not found' });
+});
+
+httpServer.listen(PORT, () => {
+  console.error(`[Gmail MCP] v2.0.0 on port ${PORT}`);
+  console.error(`[Gmail MCP] SSE: http://localhost:${PORT}/sse`);
+  console.error('[Gmail MCP] Tools: 35');
+});
