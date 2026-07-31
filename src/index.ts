@@ -6,12 +6,18 @@ import { registerDraftTools } from './tools/drafts.js';
 import { registerLabelTools } from './tools/labels.js';
 import { registerThreadTools } from './tools/threads.js';
 import { registerProfileTools } from './tools/profile.js';
+import { authEnabled, checkBearer, sendUnauthorized, handleOAuthRoute } from './mcp-auth.js';
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
+const BASE_URL =
+  process.env.SERVER_URL ||
+  (process.env.RAILWAY_PUBLIC_DOMAIN
+    ? 'https://' + process.env.RAILWAY_PUBLIC_DOMAIN
+    : 'http://localhost:' + PORT);
 const transports: Record<string, SSEServerTransport> = {};
 
 function buildMcpServer(): McpServer {
-  const server = new McpServer({ name: 'gmail-mcp-server', version: '2.0.0' });
+  const server = new McpServer({ name: 'gmail-mcp-server', version: '2.1.0' });
   registerMessageTools(server);
   registerDraftTools(server);
   registerLabelTools(server);
@@ -37,14 +43,20 @@ const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse
 
   if (req.method === 'GET' && url.pathname === '/health') {
     sendJson(res, 200, {
-      status: 'ok', server: 'gmail-mcp-server', version: '2.0.0',
+      status: 'ok', server: 'gmail-mcp-server', version: '2.1.0',
       tools: 35, activeSessions: Object.keys(transports).length,
+      auth: authEnabled,
       features: ['attachments', 'multipart-mime', 'draft-attachments']
     });
     return;
   }
 
+  if (await handleOAuthRoute(req, res, url, { baseUrl: BASE_URL, clientPrefix: 'gmail-mcp' })) {
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname === '/sse') {
+    if (!checkBearer(req)) { sendUnauthorized(res, BASE_URL); return; }
     console.error('[Gmail MCP] New SSE connection');
     try {
       const transport = new SSEServerTransport('/messages', res);
@@ -72,6 +84,7 @@ const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse
   }
 
   if (req.method === 'POST' && url.pathname === '/messages') {
+    if (!checkBearer(req)) { sendUnauthorized(res, BASE_URL); return; }
     const sessionId = url.searchParams.get('sessionId') || '';
     const transport = transports[sessionId];
     if (!transport) { sendJson(res, 404, { error: `No session: ${sessionId}` }); return; }
@@ -90,7 +103,7 @@ const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse
 });
 
 httpServer.listen(PORT, () => {
-  console.error(`[Gmail MCP] v2.0.0 on port ${PORT}`);
+  console.error(`[Gmail MCP] v2.1.0 on port ${PORT}`);
   console.error(`[Gmail MCP] SSE: http://localhost:${PORT}/sse`);
   console.error('[Gmail MCP] Tools: 35');
 });
