@@ -7,6 +7,9 @@ import { registerLabelTools } from './tools/labels.js';
 import { registerThreadTools } from './tools/threads.js';
 import { registerProfileTools } from './tools/profile.js';
 import { authEnabled, checkBearer, sendUnauthorized, handleOAuthRoute } from './mcp-auth.js';
+import { installProcessGuards, guardSseSocket } from './process-guards.js';
+
+installProcessGuards('gmail-mcp');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const BASE_URL =
@@ -17,7 +20,7 @@ const BASE_URL =
 const transports: Record<string, SSEServerTransport> = {};
 
 function buildMcpServer(): McpServer {
-  const server = new McpServer({ name: 'gmail-mcp-server', version: '2.1.0' });
+  const server = new McpServer({ name: 'gmail-mcp-server', version: '2.1.1' });
   registerMessageTools(server);
   registerDraftTools(server);
   registerLabelTools(server);
@@ -43,7 +46,7 @@ const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse
 
   if (req.method === 'GET' && url.pathname === '/health') {
     sendJson(res, 200, {
-      status: 'ok', server: 'gmail-mcp-server', version: '2.1.0',
+      status: 'ok', server: 'gmail-mcp-server', version: '2.1.1',
       tools: 35, activeSessions: Object.keys(transports).length,
       auth: authEnabled,
       features: ['attachments', 'multipart-mime', 'draft-attachments']
@@ -57,6 +60,7 @@ const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse
 
   if (req.method === 'GET' && url.pathname === '/sse') {
     if (!checkBearer(req)) { sendUnauthorized(res, BASE_URL); return; }
+    guardSseSocket(req, res, 'gmail-mcp-sse');
     console.error('[Gmail MCP] New SSE connection');
     try {
       const transport = new SSEServerTransport('/messages', res);
@@ -103,7 +107,7 @@ const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse
 });
 
 httpServer.listen(PORT, () => {
-  console.error(`[Gmail MCP] v2.1.0 on port ${PORT}`);
+  console.error(`[Gmail MCP] v2.1.1 on port ${PORT}`);
   console.error(`[Gmail MCP] SSE: http://localhost:${PORT}/sse`);
   console.error('[Gmail MCP] Tools: 35');
 });
