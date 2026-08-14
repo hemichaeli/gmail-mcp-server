@@ -7,6 +7,7 @@ import { registerLabelTools } from './tools/labels.js';
 import { registerThreadTools } from './tools/threads.js';
 import { registerProfileTools } from './tools/profile.js';
 import { authEnabled, checkBearer, sendUnauthorized, handleOAuthRoute } from './mcp-auth.js';
+import { handleGmailOAuth } from './gmail-oauth.js';
 import { installProcessGuards, guardSseSocket } from './process-guards.js';
 
 installProcessGuards('gmail-mcp');
@@ -20,7 +21,7 @@ const BASE_URL =
 const transports: Record<string, SSEServerTransport> = {};
 
 function buildMcpServer(): McpServer {
-  const server = new McpServer({ name: 'gmail-mcp-server', version: '2.1.1' });
+  const server = new McpServer({ name: 'gmail-mcp-server', version: '2.2.0' });
   registerMessageTools(server);
   registerDraftTools(server);
   registerLabelTools(server);
@@ -46,14 +47,20 @@ const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse
 
   if (req.method === 'GET' && url.pathname === '/health') {
     sendJson(res, 200, {
-      status: 'ok', server: 'gmail-mcp-server', version: '2.1.1',
+      status: 'ok', server: 'gmail-mcp-server', version: '2.2.0',
       tools: 35, activeSessions: Object.keys(transports).length,
       auth: authEnabled,
-      features: ['attachments', 'multipart-mime', 'draft-attachments']
+      features: ['attachments', 'multipart-mime', 'draft-attachments', 'self-hosted-oauth']
     });
     return;
   }
 
+  // Self-hosted Gmail OAuth flow for refresh-token generation
+  if (await handleGmailOAuth(req, res, url, BASE_URL)) {
+    return;
+  }
+
+  // MCP-level OAuth (for Claude.ai connector auth)
   if (await handleOAuthRoute(req, res, url, { baseUrl: BASE_URL, clientPrefix: 'gmail-mcp' })) {
     return;
   }
@@ -107,7 +114,8 @@ const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse
 });
 
 httpServer.listen(PORT, () => {
-  console.error(`[Gmail MCP] v2.1.1 on port ${PORT}`);
+  console.error(`[Gmail MCP] v2.2.0 on port ${PORT}`);
   console.error(`[Gmail MCP] SSE: http://localhost:${PORT}/sse`);
+  console.error(`[Gmail MCP] OAuth setup: ${BASE_URL}/oauth/gmail`);
   console.error('[Gmail MCP] Tools: 35');
 });
