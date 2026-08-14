@@ -7,8 +7,8 @@ import { registerLabelTools } from './tools/labels.js';
 import { registerThreadTools } from './tools/threads.js';
 import { registerProfileTools } from './tools/profile.js';
 import { authEnabled, checkBearer, sendUnauthorized, handleOAuthRoute } from './mcp-auth.js';
-import { handleGmailOAuth } from './gmail-oauth.js';
 import { installProcessGuards, guardSseSocket } from './process-guards.js';
+import { handleGmailOAuthRoute } from './gmail-oauth.js';
 
 installProcessGuards('gmail-mcp');
 
@@ -55,12 +55,11 @@ const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse
     return;
   }
 
-  // Self-hosted Gmail OAuth flow for refresh-token generation
-  if (await handleGmailOAuth(req, res, url, BASE_URL)) {
+  // Self-hosted Gmail OAuth flow (public - no bearer required so user can consent from a browser)
+  if (await handleGmailOAuthRoute(req, res, url, { baseUrl: BASE_URL })) {
     return;
   }
 
-  // MCP-level OAuth (for Claude.ai connector auth)
   if (await handleOAuthRoute(req, res, url, { baseUrl: BASE_URL, clientPrefix: 'gmail-mcp' })) {
     return;
   }
@@ -116,6 +115,6 @@ const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse
 httpServer.listen(PORT, () => {
   console.error(`[Gmail MCP] v2.2.0 on port ${PORT}`);
   console.error(`[Gmail MCP] SSE: http://localhost:${PORT}/sse`);
-  console.error(`[Gmail MCP] OAuth setup: ${BASE_URL}/oauth/gmail`);
+  console.error(`[Gmail MCP] OAuth: ${BASE_URL}/oauth/gmail/start`);
   console.error('[Gmail MCP] Tools: 35');
 });
