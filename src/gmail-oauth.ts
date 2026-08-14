@@ -29,9 +29,10 @@ export async function handleGmailOAuthRoute(
   req: IncomingMessage,
   res: ServerResponse,
   url: URL,
-  baseUrl: string
+  options: { baseUrl: string }
 ): Promise<boolean> {
   if (req.method !== 'GET') return false;
+  const { baseUrl } = options;
 
   // Route 1: /oauth/gmail/start - initiate OAuth flow
   if (url.pathname === '/oauth/gmail/start') {
