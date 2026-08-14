@@ -1,17 +1,18 @@
 # Gmail MCP Server
 
-A comprehensive MCP (Model Context Protocol) server for Gmail API with 34 tools covering all major Gmail operations.
+A comprehensive MCP (Model Context Protocol) server for Gmail API with 35 tools covering all major Gmail operations.
 
 ## Tools
 
-### Messages (13 tools)
+### Messages (14 tools)
 | Tool | Description |
 |---|---|
 | `gmail_list_messages` | List messages with Gmail search query support |
 | `gmail_get_message` | Fetch full message content with decoded body |
-| `gmail_send_message` | Send new email (plain text + HTML multipart) |
+| `gmail_send_message` | Send new email (plain text + HTML multipart, attachments) |
 | `gmail_reply_to_message` | Threaded reply with proper In-Reply-To headers |
 | `gmail_forward_message` | Forward email with original content quoted |
+| `gmail_get_attachment` | Download an attachment by messageId + attachmentId |
 | `gmail_trash_message` | Move to trash (recoverable) |
 | `gmail_untrash_message` | Restore from trash |
 | `gmail_delete_message` | Permanently delete (irreversible) |
@@ -26,8 +27,8 @@ A comprehensive MCP (Model Context Protocol) server for Gmail API with 34 tools 
 |---|---|
 | `gmail_list_drafts` | List all drafts |
 | `gmail_get_draft` | Fetch full draft content |
-| `gmail_create_draft` | Create a new draft |
-| `gmail_update_draft` | Update existing draft |
+| `gmail_create_draft` | Create a new draft (with attachments) |
+| `gmail_update_draft` | Update existing draft (with attachments) |
 | `gmail_send_draft` | Send a draft |
 | `gmail_delete_draft` | Delete a draft |
 
@@ -50,13 +51,13 @@ A comprehensive MCP (Model Context Protocol) server for Gmail API with 34 tools 
 | `gmail_modify_thread` | Modify labels on all thread messages |
 
 ### Profile, Filters & History (5 tools)
-| Tool | Description |
-|---|---|
-| `gmail_get_profile` | Get Gmail profile info and stats |
-| `gmail_list_filters` | List all Gmail filters |
-| `gmail_create_filter` | Create automatic email filter |
-| `gmail_delete_filter` | Delete a filter |
-| `gmail_list_history` | List mailbox changes since a history ID |
+| Tool | Description | Extra scope |
+|---|---|---|
+| `gmail_get_profile` | Get Gmail profile info and stats | - |
+| `gmail_list_filters` | List all Gmail filters | `gmail.settings.basic` |
+| `gmail_create_filter` | Create automatic email filter | `gmail.settings.basic` |
+| `gmail_delete_filter` | Delete a filter | `gmail.settings.basic` |
+| `gmail_list_history` | List mailbox changes since a history ID | - |
 
 ## Setup
 
@@ -69,18 +70,38 @@ GMAIL_REFRESH_TOKEN=your-refresh-token
 PORT=3000
 ```
 
-### Getting OAuth2 Credentials
+### Required OAuth Scopes
 
-1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create or select a project
-3. Enable the Gmail API
-4. Create OAuth 2.0 credentials (Web application type)
-5. Add redirect URI: `https://developers.google.com/oauthplayground`
-6. Go to [OAuth 2.0 Playground](https://developers.google.com/oauthplayground)
-7. Configure with your Client ID and Secret
-8. Authorize scope: `https://mail.google.com/` (full Gmail access)
-9. Exchange authorization code for tokens
-10. Copy the refresh token
+The refresh token MUST be issued with ALL of the following scopes, otherwise Filter tools and any future Settings tools will return `403 Permission denied`:
+
+```
+https://mail.google.com/
+https://www.googleapis.com/auth/gmail.settings.basic
+https://www.googleapis.com/auth/gmail.settings.sharing
+```
+
+Important: `https://mail.google.com/` (full Gmail access) does NOT include the Settings scopes. They must be requested explicitly.
+
+| Scope | Enables |
+|---|---|
+| `https://mail.google.com/` | Full read/send/modify/delete on messages, drafts, threads, labels |
+| `gmail.settings.basic` | Filters, vacation responder, POP/IMAP, forwarding, language, display |
+| `gmail.settings.sharing` | Send-as aliases, sensitive forwarding, delegates |
+
+### Getting a Refresh Token with All Scopes
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com/) → APIs & Services → Library → enable **Gmail API**.
+2. Go to Credentials → create **OAuth 2.0 Client ID** (Web application).
+3. Add authorized redirect URI: `https://developers.google.com/oauthplayground`.
+4. Open [OAuth 2.0 Playground](https://developers.google.com/oauthplayground).
+5. Click the gear icon (top right) → check **"Use your own OAuth credentials"** → paste your Client ID and Secret.
+6. In "Step 1 - Select & authorize APIs", scroll to the bottom and paste ALL scopes in "Input your own scopes":
+   ```
+   https://mail.google.com/ https://www.googleapis.com/auth/gmail.settings.basic https://www.googleapis.com/auth/gmail.settings.sharing
+   ```
+7. Click **Authorize APIs** → approve on Google.
+8. In "Step 2", click **Exchange authorization code for tokens**.
+9. Copy the **Refresh token** and set it as `GMAIL_REFRESH_TOKEN`.
 
 ### Claude.ai Connector
 
