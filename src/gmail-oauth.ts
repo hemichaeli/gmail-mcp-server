@@ -1,166 +1,108 @@
 import { IncomingMessage, ServerResponse } from 'node:http';
 import { OAuth2Client } from 'google-auth-library';
 
-const REQUIRED_SCOPES = [
+const GMAIL_SCOPES = [
   'https://mail.google.com/',
   'https://www.googleapis.com/auth/gmail.settings.basic',
   'https://www.googleapis.com/auth/gmail.settings.sharing',
 ];
 
-function esc(s: string): string {
-  return String(s).replace(/[&<>"']/g, c => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-  }[c] as string));
+function getRedirectUri(baseUrl: string): string {
+  return `${baseUrl.replace(/\/$/, '')}/oauth/gmail/callback`;
 }
 
-function requiredEnv(): { clientId: string; clientSecret: string } | null {
+function getFlowClient(baseUrl: string): OAuth2Client {
   const clientId = process.env.GMAIL_CLIENT_ID;
   const clientSecret = process.env.GMAIL_CLIENT_SECRET;
-  if (!clientId || !clientSecret) return null;
-  return { clientId, clientSecret };
+  if (!clientId || !clientSecret) throw new Error('Missing GMAIL_CLIENT_ID/GMAIL_CLIENT_SECRET');
+  return new OAuth2Client(clientId, clientSecret, getRedirectUri(baseUrl));
 }
 
-export async function handleGmailOAuth(
+function sendHtml(res: ServerResponse, status: number, html: string) {
+  res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end(html);
+}
+
+function esc(s: string): string {
+  return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string));
+}
+
+export async function handleGmailOAuthRoute(
   req: IncomingMessage,
   res: ServerResponse,
   url: URL,
-  baseUrl: string
+  ctx: { baseUrl: string }
 ): Promise<boolean> {
-  const env = requiredEnv();
-  if (!env) return false;
+  if (req.method !== 'GET') return false;
 
-  const redirectUri = `${baseUrl}/oauth/gmail/callback`;
-
-  // Landing page - shows the setup + link to start the flow
-  if (req.method === 'GET' && url.pathname === '/oauth/gmail') {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(`<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>Gmail MCP - OAuth Setup</title>
-<style>
-  body{font-family:-apple-system,system-ui,sans-serif;max-width:720px;margin:40px auto;padding:24px;background:#0d1117;color:#c9d1d9;line-height:1.55}
-  .card{background:#161b22;padding:24px;border-radius:10px;border:1px solid #30363d;margin-bottom:16px}
-  h1{margin:0 0 12px;font-size:22px}
-  h2{font-size:15px;margin:20px 0 8px;color:#8b949e;text-transform:uppercase;letter-spacing:.5px}
-  code{background:#0d1117;padding:2px 6px;border-radius:4px;border:1px solid #30363d;font-size:13px;color:#79c0ff}
-  pre{background:#0d1117;padding:12px;border-radius:6px;border:1px solid #30363d;overflow:auto;font-size:12px;color:#79c0ff}
-  .btn{display:inline-block;background:#238636;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;font-weight:600;margin-top:12px}
-  .btn:hover{background:#2ea043}
-  ol{padding-left:22px}
-  li{margin-bottom:6px}
-  .warn{background:#3d2817;border:1px solid #5c3617;color:#f0883e;padding:12px;border-radius:6px;font-size:13px}
-</style></head><body>
-<div class="card">
-  <h1>Gmail MCP - OAuth Refresh Token Generator</h1>
-  <p>Generates a fresh <code>GMAIL_REFRESH_TOKEN</code> with all scopes needed by this server (messages + settings).</p>
-
-  <h2>Prerequisite (one time)</h2>
-  <ol>
-    <li>Open <a href="https://console.cloud.google.com/apis/credentials" target="_blank" style="color:#79c0ff">Google Cloud Console - Credentials</a></li>
-    <li>Open the OAuth 2.0 Client you use for this project</li>
-    <li>Under <b>Authorized redirect URIs</b>, add: <pre>${esc(redirectUri)}</pre></li>
-    <li>Save</li>
-  </ol>
-
-  <h2>Scopes that will be requested</h2>
-  <pre>${REQUIRED_SCOPES.map(esc).join('\n')}</pre>
-
-  <a class="btn" href="/oauth/gmail/start">Start OAuth flow</a>
-
-  <div class="warn" style="margin-top:20px">If Google shows "App not verified", click <b>Advanced</b> then <b>Go to (unsafe)</b>. This is your own private OAuth app.</div>
-</div>
-</body></html>`);
-    return true;
-  }
-
-  // Start flow: redirect to Google
-  if (req.method === 'GET' && url.pathname === '/oauth/gmail/start') {
-    const client = new OAuth2Client(env.clientId, env.clientSecret, redirectUri);
-    const authUrl = client.generateAuthUrl({
-      access_type: 'offline',
-      prompt: 'consent', // force refresh_token every time
-      scope: REQUIRED_SCOPES,
-      include_granted_scopes: true,
-    });
-    res.writeHead(302, { Location: authUrl });
-    res.end();
-    return true;
-  }
-
-  // Callback: exchange code for tokens
-  if (req.method === 'GET' && url.pathname === '/oauth/gmail/callback') {
-    const code = url.searchParams.get('code');
-    const oauthError = url.searchParams.get('error');
-
-    if (oauthError) {
-      res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(`<h1>OAuth Error</h1><p>${esc(oauthError)}</p><p><a href="/oauth/gmail">Try again</a></p>`);
-      return true;
-    }
-
-    if (!code) {
-      res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(`<h1>Missing authorization code</h1><p><a href="/oauth/gmail">Try again</a></p>`);
-      return true;
-    }
-
+  // Start: redirect user to Google consent screen with full scope set
+  if (url.pathname === '/oauth/gmail/start') {
     try {
-      const client = new OAuth2Client(env.clientId, env.clientSecret, redirectUri);
-      const { tokens } = await client.getToken(code);
-      const refreshToken = tokens.refresh_token;
-      const grantedScopes = tokens.scope || '';
-
-      if (!refreshToken) {
-        res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(`<h1>No refresh token returned</h1>
-<p>Google skipped consent (already granted). Revoke the app at <a href="https://myaccount.google.com/permissions" target="_blank">myaccount.google.com/permissions</a> and try again.</p>`);
-        return true;
-      }
-
-      // Verify all required scopes were granted
-      const missing = REQUIRED_SCOPES.filter(s => !grantedScopes.includes(s));
-
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(`<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>Gmail MCP - Token Ready</title>
-<style>
-  body{font-family:-apple-system,system-ui,sans-serif;max-width:720px;margin:40px auto;padding:24px;background:#0d1117;color:#c9d1d9;line-height:1.55}
-  .card{background:#161b22;padding:24px;border-radius:10px;border:1px solid #30363d}
-  h1{margin:0 0 12px;font-size:22px;color:#3fb950}
-  h2{font-size:14px;margin:20px 0 8px;color:#8b949e;text-transform:uppercase;letter-spacing:.5px}
-  pre{background:#0d1117;padding:14px;border-radius:6px;border:1px solid #30363d;overflow:auto;font-size:11px;color:#79c0ff;word-break:break-all;white-space:pre-wrap}
-  .token{color:#3fb950;font-size:12px}
-  .warn{background:#3d2817;border:1px solid #5c3617;color:#f0883e;padding:12px;border-radius:6px;font-size:13px;margin-top:12px}
-  .ok{background:#0f2417;border:1px solid #1e4a2e;color:#3fb950;padding:12px;border-radius:6px;font-size:13px;margin-top:12px}
-  button{background:#238636;color:#fff;border:0;padding:8px 16px;border-radius:6px;cursor:pointer;font-weight:600;margin-top:8px}
-  button:hover{background:#2ea043}
-</style></head><body>
-<div class="card">
-  <h1>Refresh Token Generated</h1>
-
-  <h2>Refresh token (copy this)</h2>
-  <pre id="tok" class="token">${esc(refreshToken)}</pre>
-  <button onclick="navigator.clipboard.writeText(document.getElementById('tok').textContent).then(()=>this.textContent='Copied')">Copy to clipboard</button>
-
-  <h2>Granted scopes</h2>
-  <pre>${esc(grantedScopes.split(' ').join('\n'))}</pre>
-
-  ${missing.length === 0
-    ? `<div class="ok">All required scopes granted.</div>`
-    : `<div class="warn">Missing scopes: ${missing.map(esc).join(', ')}<br>Make sure your OAuth consent screen has these scopes enabled.</div>`
+      const client = getFlowClient(ctx.baseUrl);
+      const authUrl = client.generateAuthUrl({
+        access_type: 'offline',
+        prompt: 'consent',
+        scope: GMAIL_SCOPES,
+        include_granted_scopes: true,
+      });
+      res.writeHead(302, { Location: authUrl });
+      res.end();
+    } catch (err) {
+      sendHtml(res, 500, `<h1>OAuth start failed</h1><pre>${esc(err instanceof Error ? err.message : String(err))}</pre>`);
+    }
+    return true;
   }
 
-  <h2>Next step</h2>
-  <p>Paste this refresh token back into the chat. It will be written to Railway env <code>GMAIL_REFRESH_TOKEN</code>.</p>
-</div>
-</body></html>`);
-      return true;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(`<h1>Token exchange failed</h1><pre>${esc(msg)}</pre><p><a href="/oauth/gmail">Try again</a></p>`);
+  // Callback: exchange code for tokens, render refresh token page
+  if (url.pathname === '/oauth/gmail/callback') {
+    const code = url.searchParams.get('code');
+    const err = url.searchParams.get('error');
+    if (err) {
+      sendHtml(res, 400, `<h1>Authorization denied</h1><p>${esc(err)}</p><p><a href="/oauth/gmail/start">Try again</a></p>`);
       return true;
     }
+    if (!code) {
+      sendHtml(res, 400, `<h1>Missing code</h1><p><a href="/oauth/gmail/start">Start over</a></p>`);
+      return true;
+    }
+    try {
+      const client = getFlowClient(ctx.baseUrl);
+      const { tokens } = await client.getToken(code);
+      const rt = tokens.refresh_token || '';
+      const scopes = (tokens.scope || '').split(/\s+/).filter(Boolean);
+      const missing = GMAIL_SCOPES.filter(s => !scopes.includes(s));
+
+      const page = `<!doctype html>
+<html><head><meta charset="utf-8"><title>Gmail MCP - Refresh Token</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 780px; margin: 40px auto; padding: 0 20px; color: #222; }
+  h1 { margin: 0 0 8px; font-size: 22px; }
+  .card { background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 8px; padding: 16px; margin: 16px 0; }
+  .ok { border-color: #1a7f37; background: #dafbe1; }
+  .warn { border-color: #9a6700; background: #fff8c5; }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  pre { white-space: pre-wrap; word-break: break-all; background: #fff; border: 1px solid #d0d7de; padding: 12px; border-radius: 6px; margin: 0; font-size: 13px; }
+  button { background: #1f6feb; color: #fff; border: 0; padding: 8px 14px; border-radius: 6px; cursor: pointer; font-size: 14px; margin-top: 8px; }
+  button:hover { background: #1a5cc4; }
+  ul { margin: 6px 0 0 20px; padding: 0; }
+  li { margin: 2px 0; font-size: 13px; }
+</style></head>
+<body>
+<h1>Gmail MCP - Refresh Token</h1>
+${rt ? `<div class="card ok"><b>Refresh token issued.</b> Copy and send it to Claude to update Railway env <code>GMAIL_REFRESH_TOKEN</code>.</div>` : `<div class="card warn"><b>No refresh_token returned.</b> This usually means the app already has a token for this user - revoke it at <a href="https://myaccount.google.com/permissions" target="_blank">myaccount.google.com/permissions</a> and try again.</div>`}
+${rt ? `<pre id="rt">${esc(rt)}</pre>
+<button onclick="navigator.clipboard.writeText(document.getElementById('rt').innerText).then(()=>this.innerText='Copied!')">Copy refresh token</button>` : ''}
+<div class="card"><b>Granted scopes (${scopes.length})</b><ul>${scopes.map(s => `<li><code>${esc(s)}</code></li>`).join('')}</ul></div>
+${missing.length ? `<div class="card warn"><b>Missing scopes (${missing.length})</b> - the Google Cloud project's OAuth consent screen may not have these enabled.<ul>${missing.map(s => `<li><code>${esc(s)}</code></li>`).join('')}</ul></div>` : `<div class="card ok"><b>All required scopes granted.</b></div>`}
+</body></html>`;
+      sendHtml(res, 200, page);
+    } catch (e) {
+      sendHtml(res, 500, `<h1>Token exchange failed</h1><pre>${esc(e instanceof Error ? e.message : String(e))}</pre><p><a href="/oauth/gmail/start">Start over</a></p>`);
+    }
+    return true;
   }
 
   return false;
 }
+
+export const GMAIL_OAUTH_SCOPES = GMAIL_SCOPES;
