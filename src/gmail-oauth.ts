@@ -1,108 +1,166 @@
 import { IncomingMessage, ServerResponse } from 'node:http';
-import { OAuth2Client } from 'google-auth-library';
 
-const GMAIL_SCOPES = [
+const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
+const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
+
+const REQUIRED_SCOPES = [
   'https://mail.google.com/',
   'https://www.googleapis.com/auth/gmail.settings.basic',
   'https://www.googleapis.com/auth/gmail.settings.sharing',
 ];
 
-function getRedirectUri(baseUrl: string): string {
-  return `${baseUrl.replace(/\/$/, '')}/oauth/gmail/callback`;
-}
-
-function getFlowClient(baseUrl: string): OAuth2Client {
-  const clientId = process.env.GMAIL_CLIENT_ID;
-  const clientSecret = process.env.GMAIL_CLIENT_SECRET;
-  if (!clientId || !clientSecret) throw new Error('Missing GMAIL_CLIENT_ID/GMAIL_CLIENT_SECRET');
-  return new OAuth2Client(clientId, clientSecret, getRedirectUri(baseUrl));
-}
-
-function sendHtml(res: ServerResponse, status: number, html: string) {
-  res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8' });
-  res.end(html);
-}
-
-function esc(s: string): string {
-  return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string));
+function html(body: string): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Gmail MCP OAuth</title>
+<style>
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:720px;margin:40px auto;padding:0 20px;color:#1a1a1a;line-height:1.5}
+  h1{color:#1a73e8;font-size:24px}
+  h2{font-size:18px;margin-top:32px}
+  .box{background:#f5f7fa;border:1px solid #e0e4e8;border-radius:8px;padding:16px;margin:16px 0}
+  .token{background:#0f172a;color:#4ade80;padding:16px;border-radius:8px;font-family:'SF Mono',Monaco,monospace;font-size:13px;word-break:break-all;user-select:all;cursor:text}
+  .ok{color:#0f9d58;font-weight:600}
+  .err{color:#d93025;font-weight:600}
+  code{background:#f0f0f0;padding:2px 6px;border-radius:4px;font-family:'SF Mono',Monaco,monospace;font-size:13px}
+  .btn{display:inline-block;background:#1a73e8;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:500}
+  ol li{margin:8px 0}
+</style></head><body>${body}</body></html>`;
 }
 
 export async function handleGmailOAuthRoute(
   req: IncomingMessage,
   res: ServerResponse,
   url: URL,
-  ctx: { baseUrl: string }
+  baseUrl: string
 ): Promise<boolean> {
   if (req.method !== 'GET') return false;
 
-  // Start: redirect user to Google consent screen with full scope set
+  // Route 1: /oauth/gmail/start - initiate OAuth flow
   if (url.pathname === '/oauth/gmail/start') {
-    try {
-      const client = getFlowClient(ctx.baseUrl);
-      const authUrl = client.generateAuthUrl({
-        access_type: 'offline',
-        prompt: 'consent',
-        scope: GMAIL_SCOPES,
-        include_granted_scopes: true,
-      });
-      res.writeHead(302, { Location: authUrl });
-      res.end();
-    } catch (err) {
-      sendHtml(res, 500, `<h1>OAuth start failed</h1><pre>${esc(err instanceof Error ? err.message : String(err))}</pre>`);
+    const clientId = process.env.GMAIL_CLIENT_ID;
+    if (!clientId) {
+      res.writeHead(500, { 'Content-Type': 'text/html' });
+      res.end(html('<h1 class="err">Missing GMAIL_CLIENT_ID env var</h1>'));
+      return true;
     }
+
+    const redirectUri = `${baseUrl}/oauth/gmail/callback`;
+    const params = new URLSearchParams({
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      response_type: 'code',
+      scope: REQUIRED_SCOPES.join(' '),
+      access_type: 'offline',
+      prompt: 'consent',
+      include_granted_scopes: 'true',
+    });
+
+    res.writeHead(302, { Location: `${GOOGLE_AUTH_URL}?${params.toString()}` });
+    res.end();
     return true;
   }
 
-  // Callback: exchange code for tokens, render refresh token page
+  // Route 2: /oauth/gmail/callback - handle Google's redirect
   if (url.pathname === '/oauth/gmail/callback') {
     const code = url.searchParams.get('code');
-    const err = url.searchParams.get('error');
-    if (err) {
-      sendHtml(res, 400, `<h1>Authorization denied</h1><p>${esc(err)}</p><p><a href="/oauth/gmail/start">Try again</a></p>`);
-      return true;
-    }
-    if (!code) {
-      sendHtml(res, 400, `<h1>Missing code</h1><p><a href="/oauth/gmail/start">Start over</a></p>`);
-      return true;
-    }
-    try {
-      const client = getFlowClient(ctx.baseUrl);
-      const { tokens } = await client.getToken(code);
-      const rt = tokens.refresh_token || '';
-      const scopes = (tokens.scope || '').split(/\s+/).filter(Boolean);
-      const missing = GMAIL_SCOPES.filter(s => !scopes.includes(s));
+    const error = url.searchParams.get('error');
 
-      const page = `<!doctype html>
-<html><head><meta charset="utf-8"><title>Gmail MCP - Refresh Token</title>
-<style>
-  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 780px; margin: 40px auto; padding: 0 20px; color: #222; }
-  h1 { margin: 0 0 8px; font-size: 22px; }
-  .card { background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 8px; padding: 16px; margin: 16px 0; }
-  .ok { border-color: #1a7f37; background: #dafbe1; }
-  .warn { border-color: #9a6700; background: #fff8c5; }
-  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  pre { white-space: pre-wrap; word-break: break-all; background: #fff; border: 1px solid #d0d7de; padding: 12px; border-radius: 6px; margin: 0; font-size: 13px; }
-  button { background: #1f6feb; color: #fff; border: 0; padding: 8px 14px; border-radius: 6px; cursor: pointer; font-size: 14px; margin-top: 8px; }
-  button:hover { background: #1a5cc4; }
-  ul { margin: 6px 0 0 20px; padding: 0; }
-  li { margin: 2px 0; font-size: 13px; }
-</style></head>
-<body>
-<h1>Gmail MCP - Refresh Token</h1>
-${rt ? `<div class="card ok"><b>Refresh token issued.</b> Copy and send it to Claude to update Railway env <code>GMAIL_REFRESH_TOKEN</code>.</div>` : `<div class="card warn"><b>No refresh_token returned.</b> This usually means the app already has a token for this user - revoke it at <a href="https://myaccount.google.com/permissions" target="_blank">myaccount.google.com/permissions</a> and try again.</div>`}
-${rt ? `<pre id="rt">${esc(rt)}</pre>
-<button onclick="navigator.clipboard.writeText(document.getElementById('rt').innerText).then(()=>this.innerText='Copied!')">Copy refresh token</button>` : ''}
-<div class="card"><b>Granted scopes (${scopes.length})</b><ul>${scopes.map(s => `<li><code>${esc(s)}</code></li>`).join('')}</ul></div>
-${missing.length ? `<div class="card warn"><b>Missing scopes (${missing.length})</b> - the Google Cloud project's OAuth consent screen may not have these enabled.<ul>${missing.map(s => `<li><code>${esc(s)}</code></li>`).join('')}</ul></div>` : `<div class="card ok"><b>All required scopes granted.</b></div>`}
-</body></html>`;
-      sendHtml(res, 200, page);
-    } catch (e) {
-      sendHtml(res, 500, `<h1>Token exchange failed</h1><pre>${esc(e instanceof Error ? e.message : String(e))}</pre><p><a href="/oauth/gmail/start">Start over</a></p>`);
+    if (error) {
+      res.writeHead(400, { 'Content-Type': 'text/html' });
+      res.end(html(`<h1 class="err">OAuth error</h1><p>${error}</p><p>${url.searchParams.get('error_description') || ''}</p>`));
+      return true;
     }
+
+    if (!code) {
+      res.writeHead(400, { 'Content-Type': 'text/html' });
+      res.end(html('<h1 class="err">No authorization code returned</h1>'));
+      return true;
+    }
+
+    const clientId = process.env.GMAIL_CLIENT_ID;
+    const clientSecret = process.env.GMAIL_CLIENT_SECRET;
+    if (!clientId || !clientSecret) {
+      res.writeHead(500, { 'Content-Type': 'text/html' });
+      res.end(html('<h1 class="err">Missing GMAIL_CLIENT_ID or GMAIL_CLIENT_SECRET env vars</h1>'));
+      return true;
+    }
+
+    const redirectUri = `${baseUrl}/oauth/gmail/callback`;
+
+    try {
+      const body = new URLSearchParams({
+        code,
+        client_id: clientId,
+        client_secret: clientSecret,
+        redirect_uri: redirectUri,
+        grant_type: 'authorization_code',
+      });
+
+      const tokenResponse = await fetch(GOOGLE_TOKEN_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body.toString(),
+      });
+
+      const data = await tokenResponse.json() as {
+        access_token?: string;
+        refresh_token?: string;
+        expires_in?: number;
+        scope?: string;
+        error?: string;
+        error_description?: string;
+      };
+
+      if (!tokenResponse.ok || data.error) {
+        res.writeHead(400, { 'Content-Type': 'text/html' });
+        res.end(html(`<h1 class="err">Token exchange failed</h1><p>${data.error || tokenResponse.status}</p><p>${data.error_description || ''}</p>`));
+        return true;
+      }
+
+      if (!data.refresh_token) {
+        res.writeHead(400, { 'Content-Type': 'text/html' });
+        res.end(html(`
+          <h1 class="err">No refresh_token returned</h1>
+          <p>This usually means Google already issued one for this client and won't issue another. Go to <a href="https://myaccount.google.com/permissions">Google Account permissions</a>, remove the app, and try again.</p>
+          <pre>${JSON.stringify(data, null, 2)}</pre>
+        `));
+        return true;
+      }
+
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(html(`
+        <h1 class="ok">✓ Refresh token generated</h1>
+        <p>Copy the token below and update the <code>GMAIL_REFRESH_TOKEN</code> environment variable in Railway:</p>
+        <div class="token">${data.refresh_token}</div>
+        <h2>Granted scopes</h2>
+        <div class="box"><code>${(data.scope || '').split(' ').join('<br>')}</code></div>
+        <h2>What to do next</h2>
+        <ol>
+          <li>Copy the refresh token above</li>
+          <li>Send it to Claude in the chat</li>
+          <li>Claude will update Railway and trigger a redeploy</li>
+        </ol>
+      `));
+      return true;
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'text/html' });
+      res.end(html(`<h1 class="err">Exception during token exchange</h1><pre>${err instanceof Error ? err.message : String(err)}</pre>`));
+      return true;
+    }
+  }
+
+  // Route 3: /oauth/gmail - landing page
+  if (url.pathname === '/oauth/gmail') {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(html(`
+      <h1>Gmail MCP OAuth Refresh</h1>
+      <p>Generate a new refresh token for the Gmail MCP server with all required scopes.</p>
+      <h2>Requested scopes</h2>
+      <div class="box"><code>${REQUIRED_SCOPES.join('<br>')}</code></div>
+      <h2>Redirect URI (must be authorized in Google Cloud Console)</h2>
+      <div class="box"><code>${baseUrl}/oauth/gmail/callback</code></div>
+      <p style="margin-top:32px"><a href="/oauth/gmail/start" class="btn">Start OAuth flow →</a></p>
+    `));
     return true;
   }
 
   return false;
 }
-
-export const GMAIL_OAUTH_SCOPES = GMAIL_SCOPES;
